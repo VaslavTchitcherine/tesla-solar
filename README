@@ -1,0 +1,237 @@
+
+TESLA MODULE SOLAR POWER SYSTEM
+
+This describes how to use Tesla Model S battery modules in an offgrid
+solar power system, comprised of:
+
+1) Any number (between 1 and 63) of Tesla Model S battery modules connected in parallel.
+The prototype system has two modules from a P100D, each 6.4 kWh. 
+
+2) A solar charge controller.
+Victron BlueSolar 24V MPPT 100/50 Charge Controller (100V, 50A maximum input).
+It is essential that the controller allows you to set the maximum charge voltage
+to something suitable for the Tesla modules (i.e. never more than 25.2V).
+
+3) An inverter for AC output.  Modern pure sine wave inverters
+are quite efficient.  Ideally you want one with an adjustable
+(or no) low voltage cutoff, as the Tesla modules are usable down to about 18V,
+lower than many other battery chemistries.
+
+4) Two hall effect current sensors (Allegro ACS758) to measure panel
+current and battery current.  The battery current can be positive or negative,
+depending on whether the battery is charging or discharging.  Panel current
+is never less than zero.
+
+5) A pair of DC solid state relays (Crydom D06D100) to disconnect the panels
+if the battery modules are overvoltage, and disconnect the battery modules if they
+are undervoltage.
+
+6) A Raspberry Pi Zero W with a custom Pi hat.  Python code on the Pi:
+	a) Communicates with the Tesla modules using a 612500 baud serial loop.
+	b) Reads current sensors using a 16 bit dual A/D (ADS1115)
+	c) Monitors and logs voltages, currents, and battery temperatures.
+	d) Serves plots of the logs on a web page (using the dygraphs.js library)
+	d) Controls the SSR disconnects via GPIO
+	e) Balances batteries at both the module and cell level, by switching in
+	   shunt resistors on the Tesla BMS boards when necessary.
+
+7) Optionally, an AC SSR (Opto22 240A45) to disconnect the output of the 
+inverter from the load.  Some inverters enter an error state if there
+is an AC load when DC input power is applied.  This SSR disconnects the
+load from the output of the inverter until several seconds after the
+inverter is connected to the battery bank by the respective DC SSR.
+
+The Pi is powered directly (through a small fuse) from the
+battery modules, using an LM2596-based buck converter.
+It is important that the Pi remain powered through
+an undervoltage condition, so that it can close the SSR to reconnect the
+battery modules to the inverter once they are sufficiently charged so that
+they are no longer undervoltage. 
+
+(BLOCK DIAGRAM)
+(PHOTOS of system and control box)
+
+
+Tesla Battery Modules
+---------------------
+
+All Telsa Model S battery modules have 6 series-connected groups
+of a large number of 18650 LiOn cells in parallel.
+For example, the P100D module has 516 18650 LiOn cells per module, connected 6s86p.
+
+A fully charged 18650 cell is 4.2V, so 4.2*6 = 25.2V is the maximum voltage
+of a fully charged module.  It is better to set the float voltage on the
+Victon charge controller for a lower voltage (e.g. 24.2V) to both
+allow some headroom for unbalanced cells and to avoid stressing the cells.
+The Panasonic NCR18650B data sheet shows a knee at around 3.0V on the
+discharge characteristics graph, so 3.0*6 = 18V can be considered the minimum usable voltage of a module.
+
+The Tesla module has a BMS board, containing:
+C8051F536 microprocessor
+Silicon Labs 8642ED RF isolator
+TI BQ76PL536A Lithium ion battery monitor (for 6 cells)
+158 ohm resistors, 4 in parallel, for a 39.5 ohms of bleed for balancing
+
+These modules communicate via 612500 baud serial, with the serial connection
+arranged in a loop (Wiring2.png).  What is meant by a loop?
+Each module receives serial data on RX (pin 2) and transmits it on TX (pin 4).
+There are two separate channels that are not connected to each other.
+So any data intended for the entire system goes to the first module, which then retransmits it
+from its TX to the input RX on the next module in the chain.
+
+Connectors for Tesla modules are:
+	Molex 15-97-5101 CONN RCPT 10POS DUAL MINI-FIT (Digikey WM4772-ND)
+and the pins are:
+	Molex 39-00-0038 CONN TERM FEMALE 18-24AWG TIN (Digikey WM2501CT-ND)
+
+
+Using the Raspberry Pi (Pi Zero W, Pi3, Pi3B+) UART
+---------------------------------------------------
+
+UART0_TXD is GPIO 14, pin 8 on GPIO header
+UART0_RXD is GPIO 15, pin 10 on GPIO header
+
+By default the the primary UART (/dev/serial0) is used for a console.
+Use the raspi-config utility to disable this.
+Select option 5, Interfacing options, then option P6, Serial, and select No.
+
+The BCM2837 on a recent Pi has two UARTS, but the mini UART is not suitable for
+high speed serial communication, having too small a buffer and variable frequency.
+To use the PL011 UART instead of the mini UART, add these lines to the /boot/config.txt file:
+        dtoverlay=pi3-disable-bt
+        enable_uart=1
+This disables the Bluetooth module and maps the PL011 UART onto GPIO pins 14 and 15,
+which appears as /dev/serial0 (a symbolic link to /dev/ttyAMA0).
+Note the pi4 instructions are different:
+https://di-marco.net/blog/it/2020-06-06-paspberry_pi_3_4_and_0_w_serial_port_usage/
+
+Also, the Pi is 3.3V, and needs to interface to 5V RS232 serial levels on the Tesla modules.
+For this, we use the circuit from the SparkFun bidirectional logic level converter
+(https://www.sparkfun.com/products/12009) which uses a BSS138 MOSFET with pullups to
+perform the level conversion.
+
+References:
+https://www.raspberrypi.org/documentation/configuration/uart.md
+https://raspberrypi.stackexchange.com/questions/45570/how-do-i-make-serial-work-on-the-raspberry-pi3-pi3b-pizerow
+
+A/D conversion
+--------------
+
+To use the ADS1115, the I2C interface has to be enabled on the Pi.
+Details on how do do this using raspi-config are here:
+    https://learn.adafruit.com/adafruits-raspberry-pi-lesson-4-gpio-setup/configuring-i2c
+
+We use the Adafruit_ADS1x15 library to communicate with the ADS1115:
+	sudo apt-get update
+	sudo apt-get install -y python-smbus
+	sudo apt-get install i2c-tools
+	sudo apt-get install build-essential python-dev python-smbus git
+	cd ~
+	git clone https://github.com/adafruit/Adafruit_Python_ADS1x15.git
+	cd Adafruit_Python_ADS1x15
+	sudo python setup.py install
+
+See:
+	https://learn.adafruit.com/adafruit-4-channel-adc-breakouts
+	https://github.com/adafruit/Adafruit_Python_ADS1X15
+	https://learn.adafruit.com/raspberry-pi-analog-to-digital-converters/ads1015-slash-ads1115
+
+
+DCDC SSR Disconnects
+--------------------
+
+A Crydom D06D100 DCDC solid state relay disconnects the panels if an overvoltage condtion
+should occur (e.g. misconfiguration or failure of the charge controller).
+And another D06D100 is used to disconnect the Tesla modules if an undervoltage condtion
+should occur (e.g. too much power consumption or insufficient sunshine).
+
+The SSRs dissipate less power than would
+mechanical contactors, except briefly during infrequent conditions of very high current draw.
+
+A mechanical contactor such as a Gigavac of suitable current capacity draws 0.28 A for a
+24 VDC coil voltage, i.e. 6.7 W at all times.
+With 0.005 ohm Rds(on) the Crydom D06D100 SSR relay at draws
+	I^2R = 100 * 100 * 0.005 = 12.5 W
+at 100A.  But in practice I never pull more than 40A from my batteries,
+and generally only a few amps.   So this Crydom DC SSR (which I
+understand to be a pair of mosfets with optoisolated driver in a
+convenient package) wastes less power than keeping the electromagnet for
+a contactor powered.
+
+Note that the Crydom D06D100 is expensive, but I would not trust a
+(possibly counterfeit) Fotek to handle the current.
+
+Battery Balancing
+-----------------
+
+Despite widespread disinformation and confusion on the subject, battery
+balancing is simple.
+
+The Tesla BMS board has shunt resistors, one per cell, which can be independently switched in to 
+bleed charge from any of the 6 cells in a battery module.   This "top balancing" should be done whenever
+any cell's voltage is sufficiently much higher than that of the second
+highest cell in the module.
+
+Analogously, at a module level, all 6 bleed resistors for a module should be
+switched in when the voltage for that module is sufficiently much higher than that of the second
+highest module.
+
+This balancing is performed by the Python code, voltage thesholds for balancing are
+parameters stored in global variables.
+
+Logging and Plotting
+--------------------
+
+The Python code writes 3 log files, the names of which must be supplied as positional
+command line parameters.
+
+This first of these log files is a CSV file, fields of which are respectively:
+datetime in ISO format (YYYY-MM-DD HH:MM:SS)
+	module 1 Soc (%)
+	module 1 Voltage (V)
+	module 1 Temperature 1 (degrees C)
+	module 1 Temperature 2 (degrees C)
+	module 1 maximum cell imbalance (V)
+	module 2 Soc (%)
+	module 2 Voltage (V)
+	module 2 Temperature 1 (degrees C)
+	module 2 Temperature 2 (degrees C)
+	module 2 maximum cell imbalance (V)
+	.
+	.
+	.
+		module n Soc (%)
+	module n Voltage (V)
+	module n Temperature 1 (degrees C)
+	module n Temperature 2 (degrees C)
+	module n maximum cell imbalance (V)
+	battery current (A)
+	panel current (A)
+
+The second log file is blank delimited file, with a timestamp and fields for the voltage of each cell.
+
+The third log file contains warnings, such as over and undervoltage conditions.
+
+Plots of fields the first log file can be made using the dygraphs.js library (http://dygraphs.com).
+Specify /var/www/html/log.csv as the first command line argument to tesla.py and use
+index.html as the home page.
+
+Here is sample output.
+You can see I had 3 espressos today.
+
+
+Pi Hat
+------
+
+Eagle files and BOM with Digikey part numbers for the Pi Hat.
+
+
+Thanks
+------
+
+Thanks to everyone who did the hard work of reverse engineering the Tesla modules, and
+to Ulrich Gall for the original Python code.
+http://evtv.me/2017/03/tesla-battery-victory-lap/
+https://github.com/collin80/TeslaBMS
+https://github.com/jarrod89/TeslaBMS
+https://github.com/tomdebree/TeslaBMS

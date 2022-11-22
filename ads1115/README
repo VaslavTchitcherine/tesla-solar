@@ -1,0 +1,9 @@
+
+hacked examples from /root/Adafruit_Python_ADS1x15/examples
+
+https://learn.adafruit.com/adafruit-4-channel-adc-breakouts
+https://github.com/adafruit/Adafruit_Python_ADS1X15
+https://learn.adafruit.com/raspberry-pi-analog-to-digital-converters/ads1015-slash-ads1115
+
+Note we have ADDR pin to GND, so i2c slave addr is 1001000 (0x48)
+
